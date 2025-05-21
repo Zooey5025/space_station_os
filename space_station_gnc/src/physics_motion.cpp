@@ -128,6 +128,8 @@ private:
     tf2::Vector3 omedotbprv; //rad/sec^2 angular acc of body frame
     Eigen::Vector4d deltacur; //rad, each CMG angle around torque axis
 
+    // モータ角速度（クラスで保持） //ADD
+    Eigen::Vector4d delta_dot_motor_global = Eigen::Vector4d::Zero();
     
     tf2::Vector3 tau_ctlcmgcur; 
     tf2::Vector3 tau_ctlthrcur; 
@@ -306,6 +308,15 @@ private:
         return qf;
     }
 
+
+
+    // モーターモデル（一次遅れを後退オイラーで近似） //ADD
+    Eigen::Vector4d firstOrderMotorResponse(const Eigen::Vector4d& prev_output, const Eigen::Vector4d& input, double dt, double tau) {
+        //return prev_output + (dt / tau) * (input - prev_output);
+        return (prev_output + (dt / tau) * input) / (1.0 + dt / tau);
+    }
+
+
     void forward_attitude_dynamics(double Tfwd_sec){
         double thetab = omebcur.length();
         if (0.5 < thetab)
@@ -320,6 +331,9 @@ private:
         int Nstep = (int)(Tfwd_sec/Tstep_rk);
         
         Eigen::Vector3d tau_allcure(tau_allcur.x(), tau_allcur.y(), tau_allcur.z());
+        Eigen::Vector4d delta_dot_motor = delta_dot_motor_global; // 前回値を使用 //ADD
+        // モーターの時定数 [sec] //ADD
+        double tau_motor = 0.001;
 
         for(int istep = 0; istep < Nstep; istep++){
             // for current 
@@ -334,21 +348,26 @@ private:
             Eigen::Vector3d omega_dot_k1 = J123inv * tau_eff;
             Eigen::Matrix<double,4,3> pseudoInv1 = pseudoinverse(delta_k1);
             Eigen::Vector3d h1 = compute_h(delta_k1);
-            Eigen::Vector4d delta_dot_k1 = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1)));
+            //Eigen::Vector4d delta_dot_k1_cmd = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1)));
+            Eigen::Vector4d delta_dot_k1_target = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1))); //ADD
+            Eigen::Vector4d delta_dot_motor_k1 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor);//ADD
             Eigen::Quaterniond omega_quat_k1(0, omega_k1.x(), omega_k1.y(), omega_k1.z());
             Eigen::Quaterniond att_dot_k1;
             att_dot_k1.coeffs() = (omega_quat_k1 * att_k1).coeffs() * 0.5;
                 
-            // for RK4 k2 
+            // for RK4 k2
             Eigen::Vector3d omega_k2 = omega_k1 + 0.5 * Tstep_rk  * omega_dot_k1;
             Eigen::Quaterniond att_k2 = att_k1;
             att_k2.coeffs() += 0.5 * Tstep_rk * att_dot_k1.coeffs();
             Eigen::Vector3d rhs2 = J123 * omega_k2;
             Eigen::Vector3d omega_dot_k2 = J123inv * (tau_allcure - omega_k2.cross(rhs2));
-            Eigen::Vector4d delta_k2 = delta_k1 + 0.5 * Tstep_rk * delta_dot_k1;
+            //Eigen::Vector4d delta_k2 = delta_k1 + 0.5 * Tstep_rk * delta_dot_k1;
+            Eigen::Vector4d delta_k2 = delta_k1 + 0.5 * Tstep_rk * delta_dot_motor_k1; //ADD
             Eigen::Matrix<double,4,3> pseudoInv2 = pseudoinverse(delta_k2);
             Eigen::Vector3d h2 = compute_h(delta_k2);
-            Eigen::Vector4d delta_dot_k2 = pseudoInv2 * (-(tau_inp + omega_k2.cross(h2)));
+            //Eigen::Vector4d delta_dot_k2 = pseudoInv2 * (-(tau_inp + omega_k2.cross(h2)));
+            Eigen::Vector4d delta_dot_k2_target = pseudoInv2 * (-(tau_inp + omega_k2.cross(h2))); //ADD
+            Eigen::Vector4d delta_dot_motor_k2 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k2_target, Tstep_rk, tau_motor); //ADD
             Eigen::Quaterniond omega_quat_k2(0, omega_k2.x(), omega_k2.y(), omega_k2.z());
             Eigen::Quaterniond att_dot_k2;
             att_dot_k2.coeffs() = (omega_quat_k2 * att_k2).coeffs() * 0.5;
@@ -359,10 +378,13 @@ private:
             att_k3.coeffs() += 0.5 * Tstep_rk * att_dot_k2.coeffs();
             Eigen::Vector3d rhs3 = J123 * omega_k3;
             Eigen::Vector3d omega_dot_k3 = J123inv * (tau_allcure - omega_k3.cross(rhs3));
-            Eigen::Vector4d delta_k3 = delta_k1 + 0.5 * Tstep_rk * delta_dot_k2;
+            //Eigen::Vector4d delta_k3 = delta_k1 + 0.5 * Tstep_rk * delta_dot_k2;
+            Eigen::Vector4d delta_k3 = delta_k1 + 0.5 * Tstep_rk * delta_dot_motor_k2; //MOD
             Eigen::Matrix<double,4,3> pseudoInv3 = pseudoinverse(delta_k3);
             Eigen::Vector3d h3 = compute_h(delta_k3);
-            Eigen::Vector4d delta_dot_k3 = pseudoInv3 * (-(tau_inp + omega_k3.cross(h3)));
+            //Eigen::Vector4d delta_dot_k3 = pseudoInv3 * (-(tau_inp + omega_k3.cross(h3)));
+            Eigen::Vector4d delta_dot_k3_target = pseudoInv3 * (-(tau_inp + omega_k3.cross(h3))); //ADD
+            Eigen::Vector4d delta_dot_motor_k3 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k3_target, Tstep_rk, tau_motor); //ADD
             Eigen::Quaterniond omega_quat_k3(0, omega_k3.x(), omega_k3.y(), omega_k3.z());
             Eigen::Quaterniond att_dot_k3;
             att_dot_k3.coeffs() = (omega_quat_k3 * att_k3).coeffs() * 0.5;
@@ -373,25 +395,34 @@ private:
             att_k4.coeffs() += Tstep_rk * att_dot_k3.coeffs();
             Eigen::Vector3d rhs4 = J123 * omega_k4;
             Eigen::Vector3d omega_dot_k4 = J123inv * (tau_allcure - omega_k4.cross(rhs4));
-            Eigen::Vector4d delta_k4 = delta_k1 + Tstep_rk * delta_dot_k3;
+            //Eigen::Vector4d delta_k4 = delta_k1 + Tstep_rk * delta_dot_k3;
+            Eigen::Vector4d delta_k4 = delta_k1 + Tstep_rk * delta_dot_motor_k3; //MOD
             Eigen::Matrix<double,4,3> pseudoInv4 = pseudoinverse(delta_k4);
             Eigen::Vector3d h4 = compute_h(delta_k4);
-            Eigen::Vector4d delta_dot_k4 = pseudoInv4 * (-(tau_inp + omega_k4.cross(h4)));
+            //Eigen::Vector4d delta_dot_k4 = pseudoInv4 * (-(tau_inp + omega_k4.cross(h4)));
+            Eigen::Vector4d delta_dot_k4_target = pseudoInv4 * (-(tau_inp + omega_k4.cross(h4))); //ADD
+            Eigen::Vector4d delta_dot_motor_k4 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k4_target, Tstep_rk, tau_motor); //ADD
             Eigen::Quaterniond omega_quat_k4(0, omega_k4.x(), omega_k4.y(), omega_k4.z());
             Eigen::Quaterniond att_dot_k4;
             att_dot_k4.coeffs() = (omega_quat_k4 * att_k4).coeffs() * 0.5;
               
             // RK4 
             omega_k1 += (Tstep_rk  / 6.0) * (omega_dot_k1 + 2 * omega_dot_k2 + 2 * omega_dot_k3 + omega_dot_k4);
-            delta_k1 += (Tstep_rk  / 6.0) * (delta_dot_k1 + 2 * delta_dot_k2 + 2 * delta_dot_k3 + delta_dot_k4);
+            //delta_k1 += (Tstep_rk  / 6.0) * (delta_dot_k1 + 2 * delta_dot_k2 + 2 * delta_dot_k3 + delta_dot_k4);
+            delta_k1 += (Tstep_rk / 6.0) * (delta_dot_motor_k1 + 2 * delta_dot_motor_k2 + 2 * delta_dot_motor_k3 + delta_dot_motor_k4); //ADD
+            delta_dot_motor += (Tstep_rk / 6.0) * (delta_dot_motor_k1 + 2 * delta_dot_motor_k2 + 2 * delta_dot_motor_k3 + delta_dot_motor_k4); //ADD
             att_k1.coeffs() += (Tstep_rk  / 6.0) * (att_dot_k1.coeffs() + 2 * att_dot_k2.coeffs() + 2 * att_dot_k3.coeffs() + att_dot_k4.coeffs());
             att_k1.normalize();
 
             omebcur.setValue(omega_k1.x(), omega_k1.y(), omega_k1.z());
             deltacur = delta_k1;
             attcur = att_k1;
-                
+            
+            std::cout << "delta_dot_target," << delta_dot_k1_target.transpose() << std::endl; //テスト用
+            std::cout << "delta_dot_motor," << delta_dot_motor_k1.transpose() << std::endl; //テスト用
+            std::cout << "delta," << delta_k1.transpose() << std::endl; //テスト用
         }
+        delta_dot_motor_global = delta_dot_motor; // 次回のステップに備えて保存 //ADD
     }
 
 
