@@ -311,11 +311,54 @@ private:
 
 
     // モーターモデル（一次遅れを後退オイラーで近似） //ADD
-    Eigen::Vector4d firstOrderMotorResponse(const Eigen::Vector4d& prev_output, const Eigen::Vector4d& input, double dt, double tau) {
+    //Eigen::Vector4d firstOrderMotorResponse(const Eigen::Vector4d& prev_output, const Eigen::Vector4d& input, double dt, double tau) {
         //return prev_output + (dt / tau) * (input - prev_output);
-        return (prev_output + (dt / tau) * input) / (1.0 + dt / tau);
-    }
+    //    return (prev_output + (dt / tau) * input) / (1.0 + dt / tau);
+    //}
 
+    //PIDコントローラ+モーターモデル
+    Eigen::Vector4d simulateMotorWithPID(
+        const Eigen::Vector4d& prev_output,
+        const Eigen::Vector4d& target_input,
+        double Tstep_rk,
+        double tau_motor,
+        Eigen::Vector4d& error_integral,
+        Eigen::Vector4d& error_prev,
+        Eigen::Vector4d& filtered_derivative,
+        const Eigen::Vector4d& Kp,
+        const Eigen::Vector4d& Ki,
+        const Eigen::Vector4d& Kd)
+    {
+        const double tau_d = 0.2; // D項フィルタの時定数
+
+        int Nsub = 5;
+        double dt_sub = Tstep_rk / Nsub;
+        Eigen::Vector4d motor_output = prev_output;
+    
+        for (int i = 0; i < Nsub; ++i) {
+            //差
+            Eigen::Vector4d error = target_input - motor_output;
+            // 積分
+            error_integral += error * dt_sub;
+            // 一階LPF形式のフィルタ
+            Eigen::Vector4d raw_derivative = (error - error_prev) / dt_sub;
+            double alpha = dt_sub / (tau_d + dt_sub);
+            filtered_derivative = (1.0 - alpha) * filtered_derivative + alpha * raw_derivative;
+
+            Eigen::Vector4d control_input = Kp.cwiseProduct(error)
+                                          + Ki.cwiseProduct(error_integral)
+                                          + Kd.cwiseProduct(filtered_derivative);
+    
+            motor_output = (motor_output + (dt_sub / tau_motor) * control_input) / (1.0 + dt_sub / tau_motor);
+            error_prev = error;
+        }
+    
+
+        std::cout << "filtered_derivative,: " << filtered_derivative.transpose() << std::endl; //テスト
+        std::cout << "motor_output: " << motor_output.transpose() << std::endl;  //テスト
+
+        return motor_output;
+    }
 
     void forward_attitude_dynamics(double Tfwd_sec){
         double thetab = omebcur.length();
@@ -332,16 +375,29 @@ private:
         
         Eigen::Vector3d tau_allcure(tau_allcur.x(), tau_allcur.y(), tau_allcur.z());
         Eigen::Vector4d delta_dot_motor = delta_dot_motor_global; // 前回値を使用 //ADD
+        Eigen::Vector4d error_prev = Eigen::Vector4d::Zero();
+        Eigen::Vector4d error_integral = Eigen::Vector4d::Zero();
+        Eigen::Vector4d filtered_derivative = Eigen::Vector4d::Zero(); 
+        Eigen::Vector4d Kp(1.5, 1.5, 1.5, 1.5);
+        Eigen::Vector4d Ki(0.03, 0.03, 0.03, 0.03);
+        Eigen::Vector4d Kd(0.001, 0.001, 0.001, 0.001);
+
+        Eigen::Vector4d delta_dot_k1_target; //テスト用に移動
+        Eigen::Vector4d delta_dot_motor_k1; //テスト用に移動
+        Eigen::Vector4d delta_k1; //テスト用に移動
+
+
         // モーターの時定数 [sec] //ADD
-        double tau_motor = 0.001;
+        double tau_motor = 0.1;
 
         for(int istep = 0; istep < Nstep; istep++){
             // for current 
             Eigen::Vector3d tau_inp(tau_ctlcmgcur.x(), tau_ctlcmgcur.y(), tau_ctlcmgcur.z());
             Eigen::Vector3d omega_k1(omebcur.x(), omebcur.y(), omebcur.z());
             Eigen::Quaterniond att_k1 = attcur;
-            Eigen::Vector4d delta_k1 = deltacur;
-            
+            //Eigen::Vector4d delta_k1 = deltacur; //後でこっちに戻す
+            delta_k1 = deltacur;
+
             // for RK4 k1 
             Eigen::Vector3d rhs1 = J123 * omega_k1;
             Eigen::Vector3d tau_eff = tau_allcure - omega_k1.cross(rhs1);
@@ -349,8 +405,12 @@ private:
             Eigen::Matrix<double,4,3> pseudoInv1 = pseudoinverse(delta_k1);
             Eigen::Vector3d h1 = compute_h(delta_k1);
             //Eigen::Vector4d delta_dot_k1_cmd = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1)));
-            Eigen::Vector4d delta_dot_k1_target = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1))); //ADD
-            Eigen::Vector4d delta_dot_motor_k1 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor);//ADD
+            //Eigen::Vector4d delta_dot_k1_target = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1))); //ADD  //後でこっちに戻す
+            delta_dot_k1_target = pseudoInv1 * (-(tau_inp + omega_k1.cross(h1))); //ADD
+            //Eigen::Vector4d delta_dot_motor_k1 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor);//ADD  //後でこっちに戻す
+            //delta_dot_motor_k1 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor);//ADD
+            //Eigen::Vector4d delta_dot_motor_k1 = simulateMotorWithPID(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor, error_integral, error_prev, Kp, Ki, Kd); //ADD
+            delta_dot_motor_k1 = simulateMotorWithPID(delta_dot_motor, delta_dot_k1_target, Tstep_rk, tau_motor, error_integral, error_prev, filtered_derivative, Kp, Ki, Kd); //ADD
             Eigen::Quaterniond omega_quat_k1(0, omega_k1.x(), omega_k1.y(), omega_k1.z());
             Eigen::Quaterniond att_dot_k1;
             att_dot_k1.coeffs() = (omega_quat_k1 * att_k1).coeffs() * 0.5;
@@ -367,7 +427,8 @@ private:
             Eigen::Vector3d h2 = compute_h(delta_k2);
             //Eigen::Vector4d delta_dot_k2 = pseudoInv2 * (-(tau_inp + omega_k2.cross(h2)));
             Eigen::Vector4d delta_dot_k2_target = pseudoInv2 * (-(tau_inp + omega_k2.cross(h2))); //ADD
-            Eigen::Vector4d delta_dot_motor_k2 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k2_target, Tstep_rk, tau_motor); //ADD
+            //Eigen::Vector4d delta_dot_motor_k2 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k2_target, Tstep_rk, tau_motor); //ADD
+            Eigen::Vector4d delta_dot_motor_k2 = simulateMotorWithPID(delta_dot_motor, delta_dot_k2_target, Tstep_rk, tau_motor, error_integral, error_prev, filtered_derivative, Kp, Ki, Kd);
             Eigen::Quaterniond omega_quat_k2(0, omega_k2.x(), omega_k2.y(), omega_k2.z());
             Eigen::Quaterniond att_dot_k2;
             att_dot_k2.coeffs() = (omega_quat_k2 * att_k2).coeffs() * 0.5;
@@ -384,7 +445,8 @@ private:
             Eigen::Vector3d h3 = compute_h(delta_k3);
             //Eigen::Vector4d delta_dot_k3 = pseudoInv3 * (-(tau_inp + omega_k3.cross(h3)));
             Eigen::Vector4d delta_dot_k3_target = pseudoInv3 * (-(tau_inp + omega_k3.cross(h3))); //ADD
-            Eigen::Vector4d delta_dot_motor_k3 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k3_target, Tstep_rk, tau_motor); //ADD
+            //Eigen::Vector4d delta_dot_motor_k3 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k3_target, Tstep_rk, tau_motor); //ADD
+            Eigen::Vector4d delta_dot_motor_k3 = simulateMotorWithPID(delta_dot_motor, delta_dot_k3_target, Tstep_rk, tau_motor, error_integral, error_prev, filtered_derivative, Kp, Ki, Kd);
             Eigen::Quaterniond omega_quat_k3(0, omega_k3.x(), omega_k3.y(), omega_k3.z());
             Eigen::Quaterniond att_dot_k3;
             att_dot_k3.coeffs() = (omega_quat_k3 * att_k3).coeffs() * 0.5;
@@ -401,7 +463,8 @@ private:
             Eigen::Vector3d h4 = compute_h(delta_k4);
             //Eigen::Vector4d delta_dot_k4 = pseudoInv4 * (-(tau_inp + omega_k4.cross(h4)));
             Eigen::Vector4d delta_dot_k4_target = pseudoInv4 * (-(tau_inp + omega_k4.cross(h4))); //ADD
-            Eigen::Vector4d delta_dot_motor_k4 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k4_target, Tstep_rk, tau_motor); //ADD
+            //Eigen::Vector4d delta_dot_motor_k4 = firstOrderMotorResponse(delta_dot_motor, delta_dot_k4_target, Tstep_rk, tau_motor); //ADD
+            Eigen::Vector4d delta_dot_motor_k4 = simulateMotorWithPID(delta_dot_motor, delta_dot_k4_target, Tstep_rk, tau_motor, error_integral, error_prev, filtered_derivative, Kp, Ki, Kd);
             Eigen::Quaterniond omega_quat_k4(0, omega_k4.x(), omega_k4.y(), omega_k4.z());
             Eigen::Quaterniond att_dot_k4;
             att_dot_k4.coeffs() = (omega_quat_k4 * att_k4).coeffs() * 0.5;
@@ -417,12 +480,18 @@ private:
             omebcur.setValue(omega_k1.x(), omega_k1.y(), omega_k1.z());
             deltacur = delta_k1;
             attcur = att_k1;
-            
-            std::cout << "delta_dot_target," << delta_dot_k1_target.transpose() << std::endl; //テスト用
-            std::cout << "delta_dot_motor," << delta_dot_motor_k1.transpose() << std::endl; //テスト用
-            std::cout << "delta," << delta_k1.transpose() << std::endl; //テスト用
         }
         delta_dot_motor_global = delta_dot_motor; // 次回のステップに備えて保存 //ADD
+
+        //時刻表示・テスト用
+        auto now = std::chrono::system_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
+        std::cout << "UNIX time (ms): " << duration.count() << std::endl;
+
+        std::cout << "delta_dot_target:" << delta_dot_k1_target.transpose() << std::endl; //テスト用
+        std::cout << "delta_dot_motor:" << delta_dot_motor_k1.transpose() << std::endl; //テスト用
+        std::cout << "delta:" << delta_k1.transpose() << std::endl; //テスト用
+
     }
 
 
